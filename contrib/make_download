@@ -1,76 +1,53 @@
-#!/usr/bin/python3
-import re
-import os
+#!/usr/bin/python2
 import sys
-import importlib
-from collections import defaultdict
+import re
+import hashlib
+import os
 
-# load version.py; needlessly complicated alternative to "imp.load_source":
-version_spec = importlib.util.spec_from_file_location('version', 'electrum/version.py')
-version_module = importlib.util.module_from_spec(version_spec)
-version_spec.loader.exec_module(version_module)
-
-ELECTRUM_VERSION = version_module.ELECTRUM_VERSION
-APK_VERSION = version_module.APK_VERSION
-print("version", ELECTRUM_VERSION)
-
-dirname = sys.argv[1]
-
-print("directory", dirname)
-
-download_page = os.path.join(dirname, "panel-download.html")
-download_template = download_page + ".template"
+from versions import version, version_win, version_mac, version_android, version_apk
+from versions import download_template, download_page
 
 with open(download_template) as f:
     string = f.read()
 
-version = version_win = version_mac = version_android = ELECTRUM_VERSION
 string = string.replace("##VERSION##", version)
 string = string.replace("##VERSION_WIN##", version_win)
 string = string.replace("##VERSION_MAC##", version_mac)
 string = string.replace("##VERSION_ANDROID##", version_android)
-string = string.replace("##VERSION_APK##", APK_VERSION)
+string = string.replace("##VERSION_APK##", version_apk)
 
 files = {
     'tgz': "Electrum-%s.tar.gz" % version,
-    'appimage': "electrum-%s-x86_64.AppImage" % version,
+    'zip': "Electrum-%s.zip" % version,
     'mac': "electrum-%s.dmg" % version_mac,
     'win': "electrum-%s.exe" % version_win,
     'win_setup': "electrum-%s-setup.exe" % version_win,
     'win_portable': "electrum-%s-portable.exe" % version_win,
-    'apk_arm64': "Electrum-%s-arm64-v8a-release.apk" % APK_VERSION,
-    'apk_armeabi': "Electrum-%s-armeabi-v7a-release.apk" % APK_VERSION,
 }
 
-# default signers
-signers = ['ThomasV', 'SomberNight']
-
-# detect extra signers
-list_dir = os.listdir('dist')
-detected_sigs = defaultdict(set)
-for f in list_dir:
-    if f.endswith('.asc'):
-        parts = f.split('.')
-        signer = parts[-2]
-        filename = '.'.join(parts[0:-2])
-        detected_sigs[signer].add(filename)
-for k, v in detected_sigs.items():
-    if v == set(files.values()):
-        if k not in signers:
-            signers.append(k)
-
-print("signers:", signers)
-
-gpg_name = lambda x: 'sombernight_releasekey' if x=='SomberNight' else x
-signers_list = ', '.join("<a href=\"https://raw.githubusercontent.com/spesmilo/electrum/master/pubkeys/%s.asc\">%s</a>"%(gpg_name(x), x) for x in signers)
-string = string.replace("##signers_list##", signers_list)
-
-for k, filename in files.items():
-    path = "dist/%s"%filename
-    assert filename in list_dir
-    link = "https://download.electrum.org/%s/%s"%(version, filename)
+for k, n in files.items():
+    path = "dist/%s"%n
+    link = "https://download.electrum.org/%s/%s"%(version,n)
+    if not os.path.exists(path):
+        os.system("wget -q %s -O %s" % (link, path))
+    if not os.path.getsize(path):
+        os.unlink(path)
+        string = re.sub("<div id=\"%s\">(.*?)</div>"%k, '', string, flags=re.DOTALL + re.MULTILINE)
+        continue
+    sigpath = path + '.asc'
+    siglink = link + '.asc'
+    if not os.path.exists(sigpath):
+        os.system("wget -q %s -O %s" % (siglink, sigpath))
+    if not os.path.getsize(sigpath):
+        os.unlink(sigpath)
+        string = re.sub("<div id=\"%s\">(.*?)</div>"%k, '', string, flags=re.DOTALL + re.MULTILINE)
+        continue
+    if os.system("gpg --verify %s"%sigpath) != 0:
+        raise BaseException(sigpath)
     string = string.replace("##link_%s##"%k, link)
-    string = string.replace("##sigs_%s##"%k, link+'.asc')
+
 
 with open(download_page,'w') as f:
     f.write(string)
+
+

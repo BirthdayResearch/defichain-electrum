@@ -1,50 +1,62 @@
-#!/bin/bash
-# This script installs our pure python dependencies into the 'packages' folder.
+#!/usr/bin/python2
 
-set -e
+import sys, re, shutil, os, hashlib
+import imp
+import getpass
 
-CONTRIB="$(dirname "$(readlink -e "$0")")"
-PROJECT_ROOT="$CONTRIB"/..
-PACKAGES="$PROJECT_ROOT"/packages/
+if __name__ == '__main__':
 
-test -n "$CONTRIB" -a -d "$CONTRIB" || exit
+    d = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), os.pardir))
+    os.chdir(d)
+    v = imp.load_source('version', 'lib/version.py')
+    version = v.ELECTRUM_VERSION
+    print "version", version
 
-if [ -d "$PACKAGES" ]; then
-  rm -r "$PACKAGES"
-fi
+    # copy dependencies into 'packages' directory
+    deps = [
+        'pyaes',
+        'ecdsa',
+        'pbkdf2',
+        'requests', # note: requests-2.5.1 is needed to build with pyinstaller
+        'qrcode',
+        'google/protobuf',
+        'dns',
+        'six',
+        'jsonrpclib',
+	'socks',
+    ]
+    for module in deps:
+        f, pathname, descr = imp.find_module(module)
+        target = 'packages/' + module + descr[0]
+        if os.path.exists(target):
+            continue
+        d = os.path.dirname(target)
+        if d and not (os.path.exists(d)):
+            os.makedirs(d)
+        if descr[0]:
+            shutil.copy(pathname, target)
+        else:
+            shutil.copytree(pathname, target, ignore=shutil.ignore_patterns('*.pyc'))
 
-# create virtualenv
-# note: venv path needs to be deterministic as some produced files will contain it
-venv_dir="$CONTRIB/.venv_make_packages/"
-rm -rf "$venv_dir"
-python3 -m venv "$venv_dir"
-source "$venv_dir"/bin/activate
+    # fix google/__init__.py needed by pyinstaller
+    n = 'packages/google/__init__.py'
+    if not os.path.exists(n):
+        os.system("echo \# do not remove>%s"%n)
 
-# installing pinned build-time requirements, such as pip/wheel/setuptools
-python -m pip install --no-dependencies --no-warn-script-location -r "$CONTRIB"/deterministic-build/requirements-build-makepackages.txt
+    # patch requests and add cacert.pem
+    import requests
+    crt = requests.certs.where()
+    n = 'packages/requests/certs.py'
+    with open(n, 'r') as f:
+        s = f.read()
+    s = s.replace("'%s'"%crt, "os.path.join(os.path.dirname(__file__), 'cacert.pem')")
+    with open(n, 'w') as f:
+	f.write(s)
+    shutil.copy(crt, 'packages/requests/cacert.pem')
 
-# opt out of compiling C extensions
-# FIXME aiohttp opt-out is not released yet: https://github.com/aio-libs/aiohttp/pull/3828
-export AIOHTTP_NO_EXTENSIONS=1
-export YARL_NO_EXTENSIONS=1
-export MULTIDICT_NO_EXTENSIONS=1
+    os.system("pyrcc4 icons.qrc -o gui/qt/icons_rc.py")
+    os.system("python setup.py sdist --format=zip,gztar")
 
-# if we end up having to compile something, at least give reproducibility a fighting chance
-export LC_ALL=C
-export TZ=UTC
-export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-export PYTHONHASHSEED="$SOURCE_DATE_EPOCH"
-export BUILD_DATE="$(LC_ALL=C TZ=UTC date +'%b %e %Y' -d @$SOURCE_DATE_EPOCH)"
-export BUILD_TIME="$(LC_ALL=C TZ=UTC date +'%H:%M:%S' -d @$SOURCE_DATE_EPOCH)"
+    print "Packages are ready in dist"
 
-# FIXME aiohttp will compile some .so files using distutils
-#       (until https://github.com/aio-libs/aiohttp/pull/4079 gets released),
-#       which are not reproducible unless using at least python 3.9
-#       (as it needs https://github.com/python/cpython/commit/0d30ae1a03102de07758650af9243fd31211325a).
-#       Hence "aiohttp-*.dist-info/" is not reproducible either.
-#       All this means that downstream users of this script, such as the sdist build
-#       and the android apk build need to make sure these files get excluded.
-# note: --no-build-isolation is needed so that pip uses the locally available setuptools and wheel,
-#       instead of downloading the latest ones
-python3 -m pip install --no-build-isolation --no-compile --no-dependencies --no-binary :all: \
-    -r "$CONTRIB"/deterministic-build/requirements.txt -t "$CONTRIB"/../packages
+

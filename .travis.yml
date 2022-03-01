@@ -1,0 +1,10 @@
+sudo: false
+language: python
+python:
+    - "2.7"
+install:
+    - pip install tox
+script:
+    - tox
+after_success:
+    - if [ "$TRAVIS_BRANCH" = "master" ]; then pip install pycurl requests && contrib/make_locale; fi

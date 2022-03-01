@@ -1,116 +1,77 @@
 #!/bin/bash
 
+# You probably need to update only this link
+ELECTRUM_GIT_URL=git://github.com/spesmilo/electrum.git
+BRANCH=master
 NAME_ROOT=electrum
 
-export PYTHONDONTWRITEBYTECODE=1  # don't create __pycache__/ folders with .pyc files
+
+# These settings probably don't need any change
+export WINEPREFIX=/opt/wine64
+
+PYHOME=c:/python27
+PYTHON="wine $PYHOME/python.exe -OO -B"
 
 
 # Let's begin!
+cd `dirname $0`
 set -e
 
-. "$CONTRIB"/build_tools_util.sh
+cd tmp
 
-pushd $WINEPREFIX/drive_c/electrum
-
-VERSION=`git describe --tags --dirty --always`
-info "Last commit: $VERSION"
-
-# Load electrum-locale for this release
-git submodule update --init
-
-pushd ./contrib/deterministic-build/electrum-locale
-if ! which msgfmt > /dev/null 2>&1; then
-    fail "Please install gettext"
+if [ -d "electrum-git" ]; then
+    # GIT repository found, update it
+    echo "Pull"
+    cd electrum-git
+    git pull
+    git checkout $BRANCH
+    cd ..
+else
+    # GIT repository not found, clone it
+    echo "Clone"
+    git clone -b $BRANCH $ELECTRUM_GIT_URL electrum-git
 fi
-# we want the binary to have only compiled (.mo) locale files; not source (.po) files
-rm -rf "$WINEPREFIX/drive_c/electrum/electrum/locale/"
-for i in ./locale/*; do
-    dir="$WINEPREFIX/drive_c/electrum/electrum/$i/LC_MESSAGES"
-    mkdir -p $dir
-    msgfmt --output-file="$dir/electrum.mo" "$i/electrum.po" || true
-done
-popd
 
-find -exec touch -d '2000-11-11T11:11:11+00:00' {} +
-popd
+cd electrum-git
+VERSION=`git describe --tags`
+echo "Last commit: $VERSION"
 
+cd ..
 
-# Install frozen dependencies
-$WINE_PYTHON -m pip install --no-dependencies --no-warn-script-location \
-    --cache-dir "$WINE_PIP_CACHE_DIR" -r "$CONTRIB"/deterministic-build/requirements.txt
+rm -rf $WINEPREFIX/drive_c/electrum
+cp -r electrum-git $WINEPREFIX/drive_c/electrum
+cp electrum-git/LICENCE .
 
-$WINE_PYTHON -m pip install --no-dependencies --no-warn-script-location \
-    --cache-dir "$WINE_PIP_CACHE_DIR" -r "$CONTRIB"/deterministic-build/requirements-binaries.txt
+# add python packages (built with make_packages)
+cp -r ../../../packages $WINEPREFIX/drive_c/electrum/
 
-$WINE_PYTHON -m pip install --no-dependencies --no-warn-script-location \
-    --cache-dir "$WINE_PIP_CACHE_DIR" -r "$CONTRIB"/deterministic-build/requirements-hw.txt
+# add locale dir
+cp -r ../../../lib/locale $WINEPREFIX/drive_c/electrum/lib/
 
-pushd $WINEPREFIX/drive_c/electrum
-# see https://github.com/pypa/pip/issues/2195 -- pip makes a copy of the entire directory
-info "Pip installing Electrum. This might take a long time if the project folder is large."
-$WINE_PYTHON -m pip install --no-dependencies --no-warn-script-location .
-popd
+# Build Qt resources
+wine $WINEPREFIX/drive_c/Python27/Lib/site-packages/PyQt4/pyrcc4.exe C:/electrum/icons.qrc -o C:/electrum/lib/icons_rc.py
+wine $WINEPREFIX/drive_c/Python27/Lib/site-packages/PyQt4/pyrcc4.exe C:/electrum/icons.qrc -o C:/electrum/gui/qt/icons_rc.py
 
+cd ..
 
 rm -rf dist/
 
-# build standalone and portable versions
-info "Running pyinstaller..."
-wine "$WINE_PYHOME/scripts/pyinstaller.exe" --noconfirm --ascii --clean --name $NAME_ROOT-$VERSION -w deterministic.spec
+# build standalone version
+$PYTHON "C:/pyinstaller/pyinstaller.py" --noconfirm --ascii --name $NAME_ROOT-$VERSION.exe -w deterministic.spec
 
-# set timestamps in dist, in order to make the installer reproducible
-pushd dist
-find -exec touch -d '2000-11-11T11:11:11+00:00' {} +
-popd
-
-info "building NSIS installer"
-# $VERSION could be passed to the electrum.nsi script, but this would require some rewriting in the script itself.
+# build NSIS installer
+# $VERSION could be passed to the electrum.nsi script, but this would require some rewriting in the script iself.
 wine "$WINEPREFIX/drive_c/Program Files (x86)/NSIS/makensis.exe" /DPRODUCT_VERSION=$VERSION electrum.nsi
 
 cd dist
 mv electrum-setup.exe $NAME_ROOT-$VERSION-setup.exe
 cd ..
 
-info "Padding binaries to 8-byte boundaries, and fixing COFF image checksum in PE header"
-# note: 8-byte boundary padding is what osslsigncode uses:
-#       https://github.com/mtrojnar/osslsigncode/blob/6c8ec4427a0f27c145973450def818e35d4436f6/osslsigncode.c#L3047
-(
-    cd dist
-    for binary_file in ./*.exe; do
-        info ">> fixing $binary_file..."
-        # code based on https://github.com/erocarrera/pefile/blob/bbf28920a71248ed5c656c81e119779c131d9bd4/pefile.py#L5877
-        python3 <<EOF
-pe_file = "$binary_file"
-with open(pe_file, "rb") as f:
-    binary = bytearray(f.read())
-pe_offset = int.from_bytes(binary[0x3c:0x3c+4], byteorder="little")
-checksum_offset = pe_offset + 88
-checksum = 0
+# build portable version
+cp portable.patch $WINEPREFIX/drive_c/electrum
+pushd $WINEPREFIX/drive_c/electrum
+patch < portable.patch 
+popd
+$PYTHON "C:/pyinstaller/pyinstaller.py" --noconfirm --ascii --name $NAME_ROOT-$VERSION-portable.exe -w deterministic.spec
 
-# Pad data to 8-byte boundary.
-remainder = len(binary) % 8
-binary += bytes(8 - remainder)
-
-for i in range(len(binary) // 4):
-    if i == checksum_offset // 4:  # Skip the checksum field
-        continue
-    dword = int.from_bytes(binary[i*4:i*4+4], byteorder="little")
-    checksum = (checksum & 0xffffffff) + dword + (checksum >> 32)
-    if checksum > 2 ** 32:
-        checksum = (checksum & 0xffffffff) + (checksum >> 32)
-
-checksum = (checksum & 0xffff) + (checksum >> 16)
-checksum = (checksum) + (checksum >> 16)
-checksum = checksum & 0xffff
-checksum += len(binary)
-
-# Set the checksum
-binary[checksum_offset : checksum_offset + 4] = int.to_bytes(checksum, byteorder="little", length=4)
-
-with open(pe_file, "wb") as f:
-    f.write(binary)
-EOF
-    done
-)
-
-sha256sum dist/electrum*.exe
+echo "Done."
