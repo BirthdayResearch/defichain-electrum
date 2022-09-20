@@ -1,4 +1,4 @@
-name: Linux build CI Test
+name: Linux build and publish
 
 on:
   # Triggers the workflow on pull request events but only for the "master" branch
