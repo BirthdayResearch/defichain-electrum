@@ -1,4 +1,4 @@
-name: Windows build CI Test
+name: Windows build and publish
 
 on:
   # Triggers the workflow on pull request events but only for the "master" branch
